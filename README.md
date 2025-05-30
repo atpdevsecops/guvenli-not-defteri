@@ -3,4 +3,5 @@ DevSecOps Pratikleri için Python Flask Not Defteri Projesi
 Trivy entegrasyonu testi.
 
 
-ghp_THISISaFAKEgithubTOKENnotREAL1234567890
+AKIAIOSFODNN7EXAMPLE
+wJalrXUtnFEMI/K7MDENG/bPx
