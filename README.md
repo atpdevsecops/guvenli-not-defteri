@@ -4,4 +4,4 @@ Trivy entegrasyonu testi.
 
 
 AKIAIOSFODNN7EXAMPLE
-wJalrXUtnFEMI/K7MDENG/bPx
+wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
