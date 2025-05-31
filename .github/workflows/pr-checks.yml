@@ -1,31 +1,33 @@
-name: PR Checks with CodeQL and Trivy
+name: PR Checks and Main Branch Docker Push
 
 permissions:
   actions: read
   contents: read      # CodeQL ve Docker build için kodu checkout etme izni
   security-events: write # CodeQL ve Trivy SARIF sonuçlarını Güvenlik sekmesine yükleme izni
-  packages: read      # Trivy imajını Docker Hub'dan çekebilmek için (aquasec/trivy-action kullanıyorsak gerekli olabilir)
+  packages: write      # GHCR'ye imaj gönderebilmek için GITHUB_TOKEN'a yazma izni
 
 on:
   pull_request_target: # Güvenlik olaylarını yazabilmek için pull_request_target kullanıyoruz
     types: [ opened, synchronize, reopened ]
     branches: [ main ]
+  push: # main branch'ine push yapıldığında da tetiklenecek
+    branches: [ main ]
 
 jobs:
-  analyze_and_scan: # İş adını daha açıklayıcı yaptık
-    name: CodeQL and Trivy Analysis
+  analyze_and_scan: # Bu iş PR'lar için çalışacak
+    name: CodeQL and Trivy Analysis (PR)
+    if: github.event_name == 'pull_request_target' # Bu job sadece pull_request_target olayında çalışsın
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Güncel versiyon
         with:
-          # PR'daki değişiklikleri analiz etmek için PR'ın kaynak (head) branch'ini checkout ediyoruz
           ref: ${{ github.event.pull_request.head.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5 # Güncel versiyon
         with:
           python-version: '3.10'
 
@@ -34,43 +36,78 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # --- CodeQL Adımları (Mevcut) ---
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v3 # Güncel versiyon
         with:
           languages: python
 
       - name: Autobuild (for CodeQL)
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@v3 # Güncel versiyon
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-      # --- CodeQL Adımları Bitti ---
+        uses: github/codeql-action/analyze@v3 # Güncel versiyon
 
-      # --- YENİ DOCKER & TRIVY ADIMLARI ---
-      - name: Build Docker image
+      - name: Build Docker image for PR
         run: |
-          # Her PR için benzersiz bir imaj etiketi oluşturalım
           IMAGE_TAG="pr-${{ github.event.pull_request.number }}"
           docker build -t guvenli-not-defteri:$IMAGE_TAG .
           echo "IMAGE_NAME_WITH_TAG=guvenli-not-defteri:$IMAGE_TAG" >> $GITHUB_ENV
 
-      - name: Run Trivy vulnerability scanner
-        uses: aquasec/trivy-action@master # Belirli bir versiyon kullanmak daha stabildir
+      - name: Run Trivy vulnerability scanner on PR image
+        uses: aquasec/trivy-action@0.24.0 # Stabil bir versiyon
         with:
           image-ref: ${{ env.IMAGE_NAME_WITH_TAG }}
-          format: 'table' # Çıktıyı konsolda tablo olarak gösterir
-          exit-code: '0' # Şimdilik açık bulsa bile PR'ı fail etmesin, sadece raporlasın
-          ignore-unfixed: true # Henüz yaması olmayan (upstream tarafından) açıkları görmezden gel
-          severity: 'HIGH,CRITICAL' # Sadece Yüksek ve Kritik seviyeli açıkları raporla
-          # SARIF formatında çıktı alıp GitHub Security'ye yüklemek için (isteğe bağlı):
-          # output: 'trivy-results.sarif'
+          format: 'table'
+          exit-code: '0' # Şimdilik açık bulsa bile PR'ı fail etmesin
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          # output: 'trivy-results.sarif' # SARIF istenirse
 
-      # İsteğe Bağlı Adım: Trivy SARIF sonuçlarını GitHub Güvenlik Sekmesine Yükleme
-      # Eğer yukarıda 'output: trivy-results.sarif' satırını aktif edersen, bu adımı da ekleyebilirsin.
-      # - name: Upload Trivy scan results to GitHub Security tab
-      #   uses: github/codeql-action/upload-sarif@v2
-      #   if: always() # Tarama başarısız olsa bile (exit-code: 0 ise bu adıma gerek yok) sonuçları yükle
+      # - name: Upload Trivy scan results to GitHub Security tab (PR)
+      #   if: always() && github.event_name == 'pull_request_target' && steps.trivy.outputs.sarif-path != ''
+      #   uses: github/codeql-action/upload-sarif@v3
       #   with:
-      #     sarif_file: 'trivy-results.sarif'
-      # --- YENİ DOCKER & TRIVY ADIMLARI BİTTİ ---
+      #     sarif_file: 'trivy-results.sarif' # trivy-action'da output olarak trivy-results.sarif belirtilmişse
+
+  build_and_push_to_ghcr:
+    name: Build and Push Docker image to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Sadece main branch'e push yapıldığında çalışsın
+    runs-on: ubuntu-latest
+    # needs: analyze_and_scan # PR kontrolleriyle doğrudan bağlantılı değil, push ile tetikleniyor
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3 # Güncel versiyon
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5 # Güncel versiyon
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/guvenli-not-defteri 
+          # Örnek etiketler: latest, commit sha, git branch adı (main ise)
+          # Daha fazla etiketleme stratejisi için metadata-action dokümantasyonuna bakılabilir.
+
+      - name: Check for Dummy API Key
+        run: |
+          if [ -n "${{ secrets.DUMMY_API_KEY }}" ]; then
+            echo "Dummy API Key secret is configured and accessible."
+            echo "First 3 chars of API Key: ${{ secrets.DUMMY_API_KEY:0:3 }}***" # Güvenlik için sadece ilk 3 karakter
+          else
+            echo "WARNING: Dummy API Key secret is NOT configured!"
+            # exit 1 # Secret yoksa build'i burada durdurmak istersen bu satırı aktif et
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6 # Güncel versiyon
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
