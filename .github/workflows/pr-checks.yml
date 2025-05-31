@@ -1,31 +1,35 @@
-name: PR Checks with CodeQL and Trivy
+name: PR Checks and Main Branch Docker Push
 
+# YENİ EKLENEN/DEĞİŞEN KISIM: packages: write iznini ekledik
 permissions:
   actions: read
   contents: read      # CodeQL ve Docker build için kodu checkout etme izni
   security-events: write # CodeQL ve Trivy SARIF sonuçlarını Güvenlik sekmesine yükleme izni
-  packages: read      # Trivy imajını Docker Hub'dan çekebilmek için (aquasec/trivy-action kullanıyorsak gerekli olabilir)
+  packages: write      # GHCR'ye imaj gönderebilmek için GITHUB_TOKEN'a yazma izni
 
 on:
   pull_request_target: # Güvenlik olaylarını yazabilmek için pull_request_target kullanıyoruz
     types: [ opened, synchronize, reopened ]
     branches: [ main ]
+  push: # YENİ EKLENEN/DEĞİŞEN KISIM: main branch'ine push yapıldığında da tetiklenecek
+    branches: [ main ]
 
 jobs:
-  analyze_and_scan: # İş adını daha açıklayıcı yaptık
-    name: CodeQL and Trivy Analysis
+  analyze_and_scan: # Bu iş adı aynı kalabilir veya daha genel bir isim verilebilir
+    name: CodeQL and Trivy Analysis (PR)
+    # YENİ EKLENEN/DEĞİŞEN KISIM: Bu job sadece pull_request_target olayında çalışsın
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # actions/checkout@v3 yerine v4 kullanmak daha günceldir
         with:
-          # PR'daki değişiklikleri analiz etmek için PR'ın kaynak (head) branch'ini checkout ediyoruz
           ref: ${{ github.event.pull_request.head.sha }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
 
       - name: Set up Python 3.10
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5 # actions/setup-python@v3 yerine v5 kullanmak daha günceldir
         with:
           python-version: '3.10'
 
@@ -34,7 +38,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # --- CodeQL Adımları (Mevcut) ---
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -45,32 +48,60 @@ jobs:
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
-      # --- CodeQL Adımları Bitti ---
 
-      # --- YENİ DOCKER & TRIVY ADIMLARI ---
-      - name: Build Docker image
+      - name: Build Docker image for PR
         run: |
-          # Her PR için benzersiz bir imaj etiketi oluşturalım
           IMAGE_TAG="pr-${{ github.event.pull_request.number }}"
           docker build -t guvenli-not-defteri:$IMAGE_TAG .
           echo "IMAGE_NAME_WITH_TAG=guvenli-not-defteri:$IMAGE_TAG" >> $GITHUB_ENV
 
-      - name: Run Trivy vulnerability scanner
-        uses: aquasec/trivy-action@master # Belirli bir versiyon kullanmak daha stabildir
+      - name: Run Trivy vulnerability scanner on PR image
+        uses: aquasec/trivy-action@0.24.0 # Belirli bir versiyon kullanmak daha stabildir (örn: 0.24.0)
         with:
           image-ref: ${{ env.IMAGE_NAME_WITH_TAG }}
-          format: 'table' # Çıktıyı konsolda tablo olarak gösterir
-          exit-code: '0' # Şimdilik açık bulsa bile PR'ı fail etmesin, sadece raporlasın
-          ignore-unfixed: true # Henüz yaması olmayan (upstream tarafından) açıkları görmezden gel
-          severity: 'HIGH,CRITICAL' # Sadece Yüksek ve Kritik seviyeli açıkları raporla
-          # SARIF formatında çıktı alıp GitHub Security'ye yüklemek için (isteğe bağlı):
-          # output: 'trivy-results.sarif'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          # output: 'trivy-results.sarif' # SARIF çıktısı istenirse aktif edilebilir
 
-      # İsteğe Bağlı Adım: Trivy SARIF sonuçlarını GitHub Güvenlik Sekmesine Yükleme
-      # Eğer yukarıda 'output: trivy-results.sarif' satırını aktif edersen, bu adımı da ekleyebilirsin.
-      # - name: Upload Trivy scan results to GitHub Security tab
-      #   uses: github/codeql-action/upload-sarif@v2
-      #   if: always() # Tarama başarısız olsa bile (exit-code: 0 ise bu adıma gerek yok) sonuçları yükle
+      # - name: Upload Trivy scan results to GitHub Security tab (PR)
+      #   if: always() && github.event_name == 'pull_request_target' # Sadece PR için ve her zaman çalışsın
+      #   uses: github/codeql-action/upload-sarif@v3
       #   with:
       #     sarif_file: 'trivy-results.sarif'
-      # --- YENİ DOCKER & TRIVY ADIMLARI BİTTİ ---
+
+  # --- YENİ EKLENEN/DEĞİŞEN KISIM: Docker imajını build edip GHCR'ye gönderme işi ---
+  build_and_push_to_ghcr:
+    name: Build and Push Docker image to GHCR
+    # Bu job sadece main branch'ine push yapıldığında çalışsın
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: analyze_and_scan # İsteğe bağlı: PR kontrolleri başarılıysa çalışsın (ancak trigger farklı olduğu için doğrudan bağımlılık kurmak zor)
+                            # Şimdilik bağımsız çalışsın, PR kontrolleri kendi içinde kalır.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }} # Veya github.actor da kullanılabilir
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/guvenli-not-defteri
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+  # --- YENİ JOB BİTTİ ---
