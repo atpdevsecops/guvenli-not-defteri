@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: guvenli-not-defteri
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5000:5000"  # Sadece localhost'a bağlan
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - APP_PORT=5000
+      # Diğer çevresel değişkenler buraya eklenebilir
+    volumes:
+      - app_logs:/app/logs
+    security_opt:
+      - no-new-privileges:true  # Konteyner içinde yeni ayrıcalıklar kazanılmasını engeller
+    cap_drop:
+      - ALL  # Tüm Linux yeteneklerini kaldır
+    cap_add:
+      - NET_BIND_SERVICE  # Sadece port bağlama yeteneğini ekle
+    read_only: true  # Dosya sistemini salt okunur yap
+    tmpfs:
+      - /tmp:size=100M  # Geçici dosyalar için RAM disk kullan
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # İsteğe bağlı: Kaynak sınırlamaları
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # İsteğe bağlı: PostgreSQL veritabanı
+  db:
+    image: postgres:14-alpine
+    container_name: guvenli-not-defteri-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=appuser
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+      - POSTGRES_DB=notesdb
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    networks:
+      - app_network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d notesdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    secrets:
+      - db_password
+
+volumes:
+  app_logs:
+    driver: local
+  db_data:
+    driver: local
+
+networks:
+  app_network:
+    driver: bridge
+    # İsteğe bağlı: Ağ izolasyonu için özel IP aralığı
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# Hassas bilgiler için Docker Secrets kullanımı
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
