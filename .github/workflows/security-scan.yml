@@ -1,0 +1,29 @@
+# .github/workflows/security-scan.yml örneği
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run SAST scan
+        uses: github/codeql-action/analyze@v2
+        
+      - name: Dependency scanning
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          
+      - name: Container scanning
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'guvenli-not-defteri:latest'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
