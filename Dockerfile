@@ -1,58 +1,81 @@
-# Dockerfile
-# 1. Temel imaj olarak Python 3.10'un slim (hafif) versiyonunu kullan
-FROM python:3.10-slim
+# SECURITY NOTES:
+# - Bu imaj, güvenlik için root olmayan bir kullanıcı kullanır
+# - Multi-stage build ile derleme araçları final imajdan çıkarılmıştır
+# - Gereksiz paketler ve dosyalar temizlenmiştir
+# - Konteyner sağlığı düzenli olarak kontrol edilir
+# - PYTHONDONTWRITEBYTECODE ve PYTHONUNBUFFERED güvenlik için ayarlanmıştır
+# - Hassas dizinler salt okunur yapılmıştır
+# - Bağımlılıklar sabitlenmiştir (requirements.txt içinde)
 
-# Ortam değişkenlerini ayarla (pip'in gereksiz loglarını engelle, Python'u optimize et)
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# 1. Build aşaması
+FROM python:3.10-slim AS builder
 
-# 2. İşletim sistemi paketlerini güncelle, gunicorn ve diğer olası bağımlılıklar için gerekli build araçlarını kur
-# ve gereksiz dosyaları temizle
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Derleme araçlarını kur
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libffi-dev musl-dev && \
-    # gcc libffi-dev musl-dev bazı python paketlerinin (örn: cryptography) derlenmesi için gerekebilir
-    apt-get upgrade -y && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 3. pip, setuptools ve wheel'i güncelle
+# pip ve setuptools'u güncelle
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# 4. Güvenlik için root olmayan bir kullanıcı (appuser) ve grup (appgroup) oluştur.
+# requirements.txt dosyasını kopyala ve bağımlılıkları yükle
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /build/wheels -r requirements.txt
+
+# 2. Final aşaması
+FROM python:3.10-slim
+
+# Güvenlik ve optimizasyon için çevresel değişkenler
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV APP_ENV=production
+ENV APP_DEBUG=false
+ENV APP_PORT=5000
+
+# Güvenlik için root olmayan kullanıcı oluştur
 RUN groupadd -r appgroup && useradd --no-log-init -r -g appgroup appuser
 
-# 5. Çalışma dizinini /app olarak ayarla
 WORKDIR /app
 
-# 6. requirements.txt dosyasını çalışma dizinine kopyala
-# Bu katmanın önbelleğe alınması için uygulama kodundan önce kopyalanır.
-COPY requirements.txt ./
+# Sadece gerekli paketleri kur
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# 7. requirements.txt dosyasındaki Python bağımlılıklarını yükle
-# --no-cache-dir imaj boyutunu küçültür.
-# Sanal ortam kullanmıyoruz çünkü konteyner zaten izole bir ortam.
-RUN pip install --no-cache-dir -r requirements.txt
+# Build aşamasından wheel dosyalarını kopyala ve yükle
+COPY --from=builder /build/wheels /wheels
+RUN pip install --no-cache --no-index --find-links=/wheels/ /wheels/* && \
+    rm -rf /wheels
 
-# 8. Proje dosyalarının geri kalanını (örn: app.py, templates klasörü) çalışma dizinine kopyala
+# Uygulama kodunu kopyala
 COPY . .
 
-# 9. /app dizininin ve içindeki tüm dosyaların sahipliğini oluşturduğumuz appuser:appgroup ikilisine ver.
-RUN chown -R appuser:appgroup /app
+# Loglar için dizin oluştur
+RUN mkdir -p /app/logs
 
-# 10. Root olmayan 'appuser' kullanıcısına geçiş yap.
+# Dosya izinlerini ve sahipliğini ayarla
+RUN find /app -type d -exec chmod 555 {} \; && \
+    find /app -type f -exec chmod 444 {} \; && \
+    chmod -R 755 /app/logs && \
+    chown -R appuser:appgroup /app
+
+# Root olmayan kullanıcıya geç
 USER appuser
 
-# 11. Flask uygulamasının çalışacağı portu belirt
+# Uygulamanın çalışacağı portu belirt
 EXPOSE 5000
 
-# 12. Konteynerin sağlıklı olup olmadığını kontrol etmek için HEALTHCHECK (isteğe bağlı ama önerilir)
-# Bu örnek, uygulamanın ana sayfasının 5 saniye içinde yanıt verip vermediğini kontrol eder.
-# Gerçek uygulamanızda özel bir /health endpoint'i oluşturmak daha iyidir.
+# Konteyner sağlık kontrolü
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:5000/ || exit 1
-  # Eğer uygulamanızda /health endpoint'i varsa: CMD curl -f http://localhost:5000/health || exit 1
 
-# 13. Konteyner başladığında uygulamayı Gunicorn ile çalıştıracak komut
-# Bu komut 'appuser' olarak çalıştırılacak.
-# app:app -> app.py dosyasındaki 'app' adlı Flask nesnesi.
-# requirements.txt dosyanızda 'gunicorn' olduğundan emin olun.
+# Uygulamayı Gunicorn ile çalıştır
 CMD ["gunicorn", "--workers", "2", "--threads", "2", "--worker-class", "gthread", "--bind", "0.0.0.0:5000", "app:app"]
